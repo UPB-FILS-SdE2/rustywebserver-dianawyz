@@ -8,6 +8,19 @@ use std::sync::Arc;
 use std::thread;
 use mime_guess::from_path;
 
+fn get_mime_type(path: &PathBuf) -> &'static str {
+    match from_path(path).first_or_octet_stream().essence_str() {
+        "text/plain" => "text/plain; charset=utf-8",
+        "text/html" => "text/html; charset=utf-8",
+        "text/css" => "text/css; charset=utf-8",
+        "application/javascript" => "text/javascript; charset=utf-8",
+        "image/jpeg" => "image/jpeg",
+        "image/png" => "image/png",
+        "application/zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
 fn main() {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
