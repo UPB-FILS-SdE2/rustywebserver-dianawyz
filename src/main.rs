@@ -77,22 +77,17 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
                     // Determine the full path
                     let full_path = root_folder.join(&path[1..]);
                     let response = match method {
-                        "GET" => handle_get_request(&full_path, &headers),
-                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
-                        _ => http_response(405, "Method Not Allowed", None, None),
+                        "GET" => handle_get_request(&full_path, &headers, method, path, &stream),
+                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..], method, path, &stream),
+                        _ => http_response(405, "Method Not Allowed", None, None, method, path, &stream),
                     };
 
                     // Send response
                     let _ = stream.write_all(response.as_bytes());
                     stream.flush().unwrap();
 
-                    // Log request
-                    let status_code = response.split_whitespace().nth(1).unwrap();
-                    let client_addr = stream.peer_addr().unwrap();
-                    println!("{} {} -> {}", method, path, status_code);
-
                 } else {
-                    let response = http_response(400, "Bad Request", None, None);
+                    let response = http_response(400, "Bad Request", None, None, "", "", &stream);
                     let _ = stream.write_all(response.as_bytes());
                 }
             }
@@ -101,9 +96,9 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
     }
 }
 
-fn handle_get_request(full_path: &Path, headers: &[String]) -> String {
+fn handle_get_request(full_path: &Path, headers: &[String], method: &str, path: &str, stream: &TcpStream) -> String {
     if !full_path.exists() {
-        return http_response(404, "Not Found", None, None);
+        return http_response(404, "Not Found", None, None, method, path, stream);
     }
     if full_path.is_dir() {
         return generate_directory_listing(full_path);
@@ -112,19 +107,19 @@ fn handle_get_request(full_path: &Path, headers: &[String]) -> String {
     match fs::read(full_path) {
         Ok(contents) => {
             let mime_type = from_path(full_path).first_or_octet_stream();
-            http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents))
+            http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents), method, path, stream)
         }
-        Err(_) => http_response(403, "Forbidden", None, None),
+        Err(_) => http_response(403, "Forbidden", None, None, method, path, stream),
     }
 }
 
-fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8]) -> String {
+fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8], method: &str, path: &str, stream: &TcpStream) -> String {
     if !full_path.exists() || !full_path.is_file() {
-        return http_response(404, "Not Found", None, None);
+        return http_response(404, "Not Found", None, None, method, path, stream);
     }
 
     if !full_path.starts_with("scripts") {
-        return http_response(403, "Forbidden", None, None);
+        return http_response(403, "Forbidden", None, None, method, path, stream);
     }
 
     let mut command = Command::new(full_path);
@@ -145,13 +140,19 @@ fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8]) -> Str
 
     let output = child.wait_with_output().unwrap();
     if output.status.success() {
-        http_response(200, "OK", None, Some(&output.stdout))
+        http_response(200, "OK", None, Some(&output.stdout), method, path, stream)
     } else {
-        http_response(500, "Internal Server Error", None, Some(&output.stderr))
+        http_response(500, "Internal Server Error", None, Some(&output.stderr), method, path, stream)
     }
 }
 
-fn http_response(status_code: u16, status_text: &str, content_type: Option<&str>, body: Option<&[u8]>) -> String {
+fn http_response(status_code: u16, status_text: &str, content_type: Option<&str>, body: Option<&[u8]>, method: &str, path: &str, stream: &TcpStream) -> String {
+    let client_addr = stream.peer_addr().unwrap();
+    let log_output = format!(
+        "{} {} {} -> {} ({})\r\n",
+        method, client_addr, path, status_code, status_text
+    );
+
     let mut response = format!("HTTP/1.0 {} {}\r\n", status_code, status_text);
     if let Some(content_type) = content_type {
         response.push_str(&format!("Content-Type: {}\r\n", content_type));
@@ -160,7 +161,8 @@ fn http_response(status_code: u16, status_text: &str, content_type: Option<&str>
     if let Some(body) = body {
         response.push_str(&String::from_utf8_lossy(body));
     }
-    response
+
+    format!("{}{}", log_output, response)
 }
 
 fn generate_directory_listing(path: &Path) -> String {
