@@ -6,10 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
-use tokio::fs as async_fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener as AsyncTcpListener, TcpStream as AsyncTcpStream};
-use tokio::task;
 use mime_guess::from_path;
 
 fn get_mime_type(path: &PathBuf) -> &'static str {
@@ -25,8 +21,7 @@ fn get_mime_type(path: &PathBuf) -> &'static str {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Parse command-line arguments
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
@@ -41,22 +36,26 @@ async fn main() {
     println!("Server listening on 0.0.0.0:{}", port);
 
     // Set up TCP listener
-    let listener = AsyncTcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
     let root_folder = Arc::new(root_folder);
 
     // Handle incoming connections
-    loop {
-        let (stream, _) = listener.accept().await.unwrap();
-        let root_folder = Arc::clone(&root_folder);
-        tokio::spawn(async move {
-            handle_client(stream, &root_folder).await;
-        });
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let root_folder = Arc::clone(&root_folder);
+                thread::spawn(move || {
+                    handle_client(stream, &root_folder);
+                });
+            }
+            Err(e) => eprintln!("Connection failed: {}", e),
+        }
     }
 }
 
-async fn handle_client(mut stream: AsyncTcpStream, root_folder: &Path) {
+fn handle_client(mut stream: TcpStream, root_folder: &Path) {
     let mut buffer = [0; 8192];
-    match stream.read(&mut buffer).await {
+    match stream.read(&mut buffer) {
         Ok(size) => {
             if size == 0 {
                 return;
@@ -78,14 +77,14 @@ async fn handle_client(mut stream: AsyncTcpStream, root_folder: &Path) {
                     // Determine the full path
                     let full_path = root_folder.join(&path[1..]);
                     let response = match method {
-                        "GET" => handle_get_request(&full_path).await,
-                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..]).await,
+                        "GET" => handle_get_request(&full_path, &headers),
+                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
                         _ => http_response(405, "Method Not Allowed", None, None),
                     };
 
                     // Send response
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    stream.flush().await.unwrap();
+                    let _ = stream.write_all(response.as_bytes());
+                    stream.flush().unwrap();
 
                     // Log request
                     let status_code = response.split_whitespace().nth(1).unwrap();
@@ -94,7 +93,7 @@ async fn handle_client(mut stream: AsyncTcpStream, root_folder: &Path) {
 
                 } else {
                     let response = http_response(400, "Bad Request", None, None);
-                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(response.as_bytes());
                 }
             }
         }
@@ -102,15 +101,15 @@ async fn handle_client(mut stream: AsyncTcpStream, root_folder: &Path) {
     }
 }
 
-async fn handle_get_request(full_path: &Path) -> String {
+fn handle_get_request(full_path: &Path, _headers: &[String]) -> String {
     if !full_path.exists() {
         return http_response(404, "Not Found", None, None);
     }
     if full_path.is_dir() {
-        return generate_directory_listing(full_path).await;
+        return generate_directory_listing(full_path);
     }
 
-    match async_fs::read(full_path).await {
+    match fs::read(full_path) {
         Ok(contents) => {
             let mime_type = from_path(full_path).first_or_octet_stream();
             http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents))
@@ -119,7 +118,7 @@ async fn handle_get_request(full_path: &Path) -> String {
     }
 }
 
-async fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8]) -> String {
+fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8]) -> String {
     if !full_path.exists() || !full_path.is_file() {
         return http_response(404, "Not Found", None, None);
     }
@@ -164,13 +163,13 @@ fn http_response(status_code: u16, status_text: &str, content_type: Option<&str>
     response
 }
 
-async fn generate_directory_listing(path: &Path) -> String {
+fn generate_directory_listing(path: &Path) -> String {
     let mut response = String::new();
     response.push_str("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n");
     response.push_str("<html><h1>Directory listing</h1><ul>");
     response.push_str(&format!("<li><a href=\"{}\">..</a></li>", path.parent().unwrap().display()));
 
-    for entry in async_fs::read_dir(path).await.unwrap() {
+    for entry in fs::read_dir(path).unwrap() {
         let entry = entry.unwrap();
         let entry_path = entry.path();
         response.push_str(&format!(
