@@ -67,7 +67,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
                 let mut parts = request_line.split_whitespace();
                 if let (Some(method), Some(path), Some(_)) = (parts.next(), parts.next(), parts.next()) {
                     // Decode URL
-                    let decoded_path = decode(path).unwrap_or_else(|_| path.to_string());
+                    let decoded_path = decode(path).unwrap_or_else(|_| path.to_string()).into_owned();
 
                     // Parse headers
                     let mut headers = Vec::new();
