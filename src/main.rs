@@ -7,8 +7,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use mime_guess::from_path;
+use urlencoding::decode;
 
-fn get_mime_type(path: &PathBuf) -> &'static str {
+fn get_mime_type(path: &Path) -> &'static str {
     match from_path(path).first_or_octet_stream().essence_str() {
         "text/plain" => "text/plain; charset=utf-8",
         "text/html" => "text/html; charset=utf-8",
@@ -65,6 +66,9 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
             if let Some(request_line) = lines.next() {
                 let mut parts = request_line.split_whitespace();
                 if let (Some(method), Some(path), Some(_)) = (parts.next(), parts.next(), parts.next()) {
+                    // Decode URL
+                    let decoded_path = decode(path).unwrap_or_else(|_| path.to_string());
+
                     // Parse headers
                     let mut headers = Vec::new();
                     for line in lines {
@@ -74,23 +78,36 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
                         headers.push(line.to_string());
                     }
 
-                    // Determine the full path
-                    let full_path = root_folder.join(&path[1..]);
-                    let response = match method {
-                        "GET" => handle_get_request(&full_path, &headers),
-                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
-                        _ => http_response(405, "Method Not Allowed", None, None),
-                    };
+                    // Determine the full path and prevent directory traversal
+                    let full_path = root_folder.join(&decoded_path[1..]).canonicalize();
+                    match full_path {
+                        Ok(full_path) => {
+                            if !full_path.starts_with(root_folder) {
+                                let response = http_response(403, "Forbidden", None, None);
+                                let _ = stream.write_all(response.as_bytes());
+                                return;
+                            }
 
-                    // Send response
-                    let _ = stream.write_all(response.as_bytes());
-                    stream.flush().unwrap();
+                            let response = match method {
+                                "GET" => handle_get_request(&full_path, &headers),
+                                "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
+                                _ => http_response(405, "Method Not Allowed", None, None),
+                            };
 
-                    // Log request
-                    let status_code = response.split_whitespace().nth(1).unwrap();
-                    let client_addr = stream.peer_addr().unwrap();
-                    println!("{} {} -> {}", method, path, status_code);
+                            // Send response
+                            let _ = stream.write_all(response.as_bytes());
+                            stream.flush().unwrap();
 
+                            // Log request
+                            let status_code = response.split_whitespace().nth(1).unwrap_or("500");
+                            let client_addr = stream.peer_addr().unwrap();
+                            println!("{} {} -> {}", method, path, status_code);
+                        }
+                        Err(_) => {
+                            let response = http_response(404, "Not Found", None, None);
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                    }
                 } else {
                     let response = http_response(400, "Bad Request", None, None);
                     let _ = stream.write_all(response.as_bytes());
@@ -111,8 +128,8 @@ fn handle_get_request(full_path: &Path, headers: &[String]) -> String {
 
     match fs::read(full_path) {
         Ok(contents) => {
-            let mime_type = from_path(full_path).first_or_octet_stream();
-            http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents))
+            let mime_type = get_mime_type(full_path);
+            http_response(200, "OK", Some(mime_type), Some(&contents))
         }
         Err(_) => http_response(403, "Forbidden", None, None),
     }
