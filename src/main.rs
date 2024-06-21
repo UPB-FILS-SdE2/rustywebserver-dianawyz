@@ -1,14 +1,15 @@
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::thread;
+use tokio::process::Command;
+use tokio::io::AsyncWriteExt;
 use mime_guess::from_path;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-fn get_mime_type(path: &PathBuf) -> &'static str {
+fn get_mime_type(path: &Path) -> &'static str {
     match from_path(path).first_or_octet_stream().essence_str() {
         "text/plain" => "text/plain; charset=utf-8",
         "text/html" => "text/html; charset=utf-8",
@@ -21,164 +22,184 @@ fn get_mime_type(path: &PathBuf) -> &'static str {
     }
 }
 
-fn main() {
-    // Parse command-line arguments
+fn parse_headers(output: &str) -> (Vec<(String, String)>, usize) {
+    let mut headers = Vec::new();
+    let mut body_start_index = 0;
+
+    for (index, line) in output.lines().enumerate() {
+        if line.is_empty() {
+            body_start_index = index + 1;
+            break;
+        }
+
+        if let Some((key, value)) = line.split_once(":") {
+            headers.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+
+    (headers, body_start_index)
+}
+
+async fn handle_request(mut stream: TcpStream, root_dir: Arc<PathBuf>) {
+    let mut buffer = [0; 8192];
+    if let Ok(size) = stream.read(&mut buffer).await {
+        if size == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..size]);
+        let (method, path, query) = parse_request(&request);
+        let full_path = root_dir.join(&path[1..]);
+        
+        let response = if path.starts_with("/..") || path.starts_with("/forbidden") {
+            println!("{} 127.0.0.1 {} -> 403 (Forbidden)", method, path);
+            b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n<html>403 Forbidden</html>".to_vec()
+        } else if path.starts_with("/scripts/") {
+            handle_script_request(&method, &path, query, &full_path, &request).await
+        } else {
+            handle_file_request(&method, &path, &full_path).await
+        };
+
+        stream.write_all(&response).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+}
+
+async fn handle_script_request(method: &str, path: &str, query: Option<String>, full_path: &PathBuf, request: &str) -> Vec<u8> {
+    if full_path.is_file() {
+        let mut cmd = Command::new(full_path);
+
+        if let Some(query) = query {
+            let query_pairs = query.split('&').map(|pair| {
+                let mut split = pair.split('=');
+                (
+                    split.next().unwrap_or("").to_string(),
+                    split.next().unwrap_or("").to_string(),
+                )
+            });
+
+            for (key, value) in query_pairs {
+                let env_var = format!("Query_{}", key);
+                cmd.env(env_var, value);
+            }
+        }
+
+        cmd.env("Method", method);
+        cmd.env("Path", path);
+
+        let output = if method == "POST" {
+            let body = get_request_body(request);
+            let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("Failed to execute script");
+
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(body.as_bytes()).await.expect("Failed to write to stdin");
+            }
+
+            child.wait_with_output().await.expect("Failed to read stdout")
+        } else {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output().await.expect("Failed to execute script")
+        };
+
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let (headers, body_start_index) = parse_headers(&output_str);
+            let body = output_str.lines().skip(body_start_index).collect::<Vec<_>>().join("\n");
+            let content_type = headers.iter().find(|&&(ref k, _)| k == "Content-type").map(|&(_, ref v)| v.clone()).unwrap_or_else(|| "text/plain".to_string());
+            let content_length = headers.iter().find(|&&(ref k, _)| k == "Content-length").map(|&(_, ref v)| v.clone()).unwrap_or_else(|| body.len().to_string());
+
+            println!("{} 127.0.0.1 {} -> 200 (OK)", method, path);
+
+            format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", content_type, content_length, body).as_bytes().to_vec()
+        } else {
+            println!("{} 127.0.0.1 {} -> 500 (Internal Server Error)", method, path);
+            b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n<html>500 Internal Server Error</html>".to_vec()
+        }
+    } else {
+        println!("{} 127.0.0.1 {} -> 404 (Not Found)", method, path);
+        b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n<html>404 Not Found</html>".to_vec()
+    }
+}
+
+async fn handle_file_request(method: &str, path: &str, full_path: &PathBuf) -> Vec<u8> {
+    match method {
+        "GET" => {
+            if full_path.is_file() {
+                let contents = fs::read(full_path).expect("Unable to read file");
+                let mime_type = get_mime_type(full_path);
+
+                println!("{} 127.0.0.1 {} -> 200 (OK)", method, path);
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    mime_type,
+                    contents.len(),
+                ).as_bytes().to_vec();
+                response.extend_from_slice(&contents);
+                response
+            } else {
+                println!("{} 127.0.0.1 {} -> 404 (Not Found)", method, path);
+                b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n<html>404 Not Found</html>".to_vec()
+            }
+        }
+        _ => {
+            println!("{} 127.0.0.1 {} -> 405 (Method Not Allowed)", method, path);
+            b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n<html>405 Method Not Allowed</html>".to_vec()
+        }
+    }
+}
+
+fn parse_request(request: &str) -> (String, String, Option<String>) {
+    let lines: Vec<&str> = request.lines().collect();
+    if lines.is_empty() {
+        return ("".to_string(), "".to_string(), None);
+    }
+
+    let mut parts = lines[0].split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let mut path = parts.next().unwrap_or("").to_string();
+    let query = if let Some(index) = path.find('?') {
+        let query = path.split_off(index + 1);
+        path.pop(); // Remove the '?' from the end of path
+        Some(query)
+    } else {
+        None
+    };
+    (method, path, query)
+}
+
+fn get_request_body(request: &str) -> String {
+    if let Some(index) = request.find("\r\n\r\n") {
+        request[index + 4..].to_string()
+    } else {
+        "".to_string()
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: rustwebserver PORT ROOT_FOLDER");
+        eprintln!("Usage: {} <port> <root_folder>", args[0]);
         return;
     }
-    let port = &args[1];
-    let root_folder = PathBuf::from(&args[2]);
 
-    // Log root folder and server listening address
-    println!("Root folder: {:?}", fs::canonicalize(&root_folder).unwrap());
+    let port: u16 = args[1].parse().expect("Invalid port number");
+    let root_dir = Arc::new(PathBuf::from(&args[2]));
+
+    let listener = TcpListener::bind(("0.0.0.0", port)).expect("Failed to bind to address");
+
+    println!("Root folder: {:?}", root_dir.canonicalize().unwrap());
     println!("Server listening on 0.0.0.0:{}", port);
 
-    // Set up TCP listener
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
-    let root_folder = Arc::new(root_folder);
-
-    // Handle incoming connections
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let root_folder = Arc::clone(&root_folder);
-                thread::spawn(move || {
-                    handle_client(stream, &root_folder);
+                let root_dir = Arc::clone(&root_dir);
+                tokio::spawn(async move {
+                    handle_request(stream, root_dir).await;
                 });
             }
-            Err(e) => eprintln!("Connection failed: {}", e),
-        }
-    }
-}
-
-fn handle_client(mut stream: TcpStream, root_folder: &Path) {
-    let mut buffer = [0; 8192];
-    match stream.read(&mut buffer) {
-        Ok(size) => {
-            if size == 0 {
-                return;
-            }
-            let request = String::from_utf8_lossy(&buffer[..size]);
-            let mut lines = request.lines();
-            if let Some(request_line) = lines.next() {
-                let mut parts = request_line.split_whitespace();
-                if let (Some(method), Some(path), Some(_)) = (parts.next(), parts.next(), parts.next()) {
-                    // Parse headers
-                    let mut headers = Vec::new();
-                    for line in lines {
-                        if line.is_empty() {
-                            break;
-                        }
-                        headers.push(line.to_string());
-                    }
-
-                    // Determine the full path
-                    let full_path = root_folder.join(&path[1..]);
-                    let response = match method {
-                        "GET" => handle_get_request(&full_path, &headers),
-                        "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
-                        _ => http_response(405, "Method Not Allowed", None, None),
-                    };
-
-                    // Send response
-                    let _ = stream.write_all(response.as_bytes());
-                    stream.flush().unwrap();
-
-                    // Log request
-                    let status_code = response.split_whitespace().nth(1).unwrap();
-                    let client_addr = stream.peer_addr().unwrap();
-                    println!("{} {} -> {}", method, path, status_code);
-
-                } else {
-                    let response = http_response(400, "Bad Request", None, None);
-                    let _ = stream.write_all(response.as_bytes());
-                }
+            Err(e) => {
+                eprintln!("Connection failed: {}", e);
             }
         }
-        Err(e) => eprintln!("Failed to read from connection: {}", e),
     }
-}
-
-fn handle_get_request(full_path: &Path, _headers: &[String]) -> String {
-    if !full_path.exists() {
-        return http_response(404, "Not Found", None, None);
-    }
-    if full_path.is_dir() {
-        return generate_directory_listing(full_path);
-    }
-
-    match fs::read(full_path) {
-        Ok(contents) => {
-            let mime_type = from_path(full_path).first_or_octet_stream();
-            http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents))
-        }
-        Err(_) => http_response(403, "Forbidden", None, None),
-    }
-}
-
-fn handle_post_request(full_path: &Path, headers: &[String], body: &[u8]) -> String {
-    if !full_path.exists() || !full_path.is_file() {
-        return http_response(404, "Not Found", None, None);
-    }
-
-    if !full_path.starts_with("scripts") {
-        return http_response(403, "Forbidden", None, None);
-    }
-
-    let mut command = Command::new(full_path);
-    for header in headers {
-        if let Some((key, value)) = header.split_once(':') {
-            command.env(key.trim(), value.trim());
-        }
-    }
-
-    command.env("Method", "POST");
-    command.env("Path", full_path.to_str().unwrap());
-    command.stdin(Stdio::piped());
-
-    let mut child = command.spawn().unwrap();
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body).unwrap();
-    }
-
-    let output = child.wait_with_output().unwrap();
-    if output.status.success() {
-        http_response(200, "OK", None, Some(&output.stdout))
-    } else {
-        http_response(500, "Internal Server Error", None, Some(&output.stderr))
-    }
-}
-
-fn http_response(status_code: u16, status_text: &str, content_type: Option<&str>, body: Option<&[u8]>) -> String {
-    let mut response = format!("HTTP/1.0 {} {}\r\n", status_code, status_text);
-    if let Some(content_type) = content_type {
-        response.push_str(&format!("Content-Type: {}\r\n", content_type));
-    }
-    response.push_str("Connection: close\r\n\r\n");
-    if let Some(body) = body {
-        response.push_str(&String::from_utf8_lossy(body));
-    }
-    response
-}
-
-fn generate_directory_listing(path: &Path) -> String {
-    let mut response = String::new();
-    response.push_str("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n");
-    response.push_str("<html><h1>Directory listing</h1><ul>");
-    response.push_str(&format!("<li><a href=\"{}\">..</a></li>", path.parent().unwrap().display()));
-
-    for entry in fs::read_dir(path).unwrap() {
-        let entry = entry.unwrap();
-        let entry_path = entry.path();
-        response.push_str(&format!(
-            "<li><a href=\"/{}\">{}</a></li>",
-            entry_path.display(),
-            entry_path.file_name().unwrap().to_string_lossy()
-        ));
-    }
-
-    response.push_str("</ul></html>");
-    response
 }

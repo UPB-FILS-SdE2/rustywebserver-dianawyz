@@ -7,4 +7,3 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-mime_guess = "2.0"
