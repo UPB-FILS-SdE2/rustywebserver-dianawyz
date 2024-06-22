@@ -1,12 +1,25 @@
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use mime_guess::from_path;
+
+fn get_mime_type(path: &PathBuf) -> &'static str {
+    match from_path(path).first_or_octet_stream().essence_str() {
+        "text/plain" => "text/plain; charset=utf-8",
+        "text/html" => "text/html; charset=utf-8",
+        "text/css" => "text/css; charset=utf-8",
+        "application/javascript" => "text/javascript; charset=utf-8",
+        "image/jpeg" => "image/jpeg",
+        "image/png" => "image/png",
+        "application/zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
 
 fn main() {
     // Parse command-line arguments
@@ -74,9 +87,9 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
                     let _ = stream.write_all(response.as_bytes());
                     stream.flush().unwrap();
 
-                    // Log request with client IP address
+                    // Log request with client IP address and requested file path
                     let status_code = response.split_whitespace().nth(1).unwrap();
-                    println!("{} {} -> {} ({})", method, client_addr, status_code, get_status_text(status_code));
+                    println!("{} {} -> {} ({})", method, client_addr, path, get_status_text(status_code));
 
                 } else {
                     let response = http_response(400, "Bad Request", None, None);
