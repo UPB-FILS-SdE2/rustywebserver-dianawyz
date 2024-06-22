@@ -54,7 +54,7 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream, root_folder: &Path) {
-    let client_addr = stream.peer_addr().unwrap().ip();
+    let client_addr = stream.peer_addr().unwrap().ip(); // Get client IP address
     let mut buffer = [0; 8192];
     match stream.read(&mut buffer) {
         Ok(size) => {
@@ -78,7 +78,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
                     // Determine the full path
                     let full_path = root_folder.join(&path[1..]);
                     let response = match method {
-                        "GET" => handle_get_request(&full_path, &headers),
+                        "GET" => handle_get_request(&full_path, &headers, client_addr),
                         "POST" => handle_post_request(&full_path, &headers, &buffer[size..]),
                         _ => http_response(405, "Method Not Allowed", None, None),
                     };
@@ -89,7 +89,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
 
                     // Log request with client IP address and requested file path
                     let status_code = response.split_whitespace().nth(1).unwrap();
-                    println!("{} {} -> {} ({})", method, client_addr, path, get_status_text(status_code));
+                    println!("{} {} {} -> {} ({})", method, client_addr, path, status_code, get_status_text(status_code));
 
                 } else {
                     let response = http_response(400, "Bad Request", None, None);
@@ -101,7 +101,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
     }
 }
 
-fn handle_get_request(full_path: &Path, headers: &[String]) -> String {
+fn handle_get_request(full_path: &PathBuf, headers: &[String], client_addr: std::net::IpAddr) -> String {
     if !full_path.exists() {
         return http_response(404, "Not Found", None, None);
     }
@@ -111,8 +111,19 @@ fn handle_get_request(full_path: &Path, headers: &[String]) -> String {
 
     match fs::read(full_path) {
         Ok(contents) => {
-            let mime_type = from_path(full_path).first_or_octet_stream();
-            http_response(200, "OK", Some(mime_type.to_string().as_str()), Some(&contents))
+            let mime_type = get_mime_type(full_path);
+            let content_type = Some(mime_type); // Adjusted to Some(mime_type) for Option<&str>
+            let status_code = 200;
+            let status_text = "OK";
+
+            // Log request
+            let method = "GET";  // Assuming this function handles only GET requests
+            let client_ip = client_addr.to_string();  // Obtain client IP from TcpStream
+            let path = full_path.to_str().unwrap_or_default();  // Convert path to string
+            let log_message = format!("{} {} {} -> {} ({})", method, client_ip, path, status_code, status_text);
+            println!("{}", log_message);
+
+            http_response(status_code, status_text, content_type, Some(&contents))
         }
         Err(_) => http_response(403, "Forbidden", None, None),
     }
