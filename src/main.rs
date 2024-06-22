@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use mime_guess::from_path;
 
-fn get_mime_type(path: &PathBuf) -> &'static str {
+/* fn get_mime_type(path: &PathBuf) -> &'static str {
     match from_path(path).first_or_octet_stream().essence_str() {
         "text/plain" => "text/plain; charset=utf-8",
         "text/html" => "text/html; charset=utf-8",
@@ -19,7 +19,7 @@ fn get_mime_type(path: &PathBuf) -> &'static str {
         "application/zip" => "application/zip",
         _ => "application/octet-stream",
     }
-}
+} */
 
 fn main() {
     // Parse command-line arguments
