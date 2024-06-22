@@ -41,7 +41,7 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream, root_folder: &Path) {
-    let client_addr = stream.peer_addr().unwrap();
+    let client_addr = stream.peer_addr().unwrap().ip();
     let mut buffer = [0; 8192];
     match stream.read(&mut buffer) {
         Ok(size) => {
@@ -76,7 +76,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
 
                     // Log request with client IP address
                     let status_code = response.split_whitespace().nth(1).unwrap();
-                    println!("{} {} {} -> {} ({})", method, client_addr, path, status_code, get_status_text(status_code));
+                    println!("{} {} -> {} ({})", method, client_addr, status_code, get_status_text(status_code));
 
                 } else {
                     let response = http_response(400, "Bad Request", None, None);
