@@ -23,8 +23,15 @@ This function processes POST requests. Checks if the requested script exists in 
 * Returns 404 Not Found if the script does not exist
 
 ### http_response
-This function constructs an HTTP response string with the status code, status text, headers, and body
+This function constructs an HTTP response string. It includes:
+    * Status code
+    * Status text
+    * Headers
+    * Body
 
 ### generate_directory_listing
-This function generates an HTML response listing the contents of a directory
+This function generates an HTML response. It lists the contents of a directory, including a link to the parent directory
+
+### get_status_text
+The function returns the status text corresponding to a given status code
 

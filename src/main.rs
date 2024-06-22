@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-fn get_mime_type(_: &Path) -> Option<&'static str> {
+fn get_mime_type(_: &Path ) -> Option<&'static str> {
     None
 }
 
