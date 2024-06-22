@@ -6,19 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
-use mime_guess::from_path;
 
-fn get_mime_type(path: &PathBuf) -> &'static str {
-    match from_path(path).first_or_octet_stream().essence_str() {
-        "text/plain" => "text/plain; charset=utf-8",
-        "text/html" => "text/html; charset=utf-8",
-        "text/css" => "text/css; charset=utf-8",
-        "application/javascript" => "text/javascript; charset=utf-8",
-        "image/jpeg" => "image/jpeg",
-        "image/png" => "image/png",
-        "application/zip" => "application/zip",
-        _ => "application/octet-stream",
-    }
+fn get_mime_type(_: &Path) -> Option<&'static str> {
+    None
 }
 
 fn main() {
@@ -100,8 +90,7 @@ fn handle_client(mut stream: TcpStream, root_folder: &Path) {
         Err(e) => eprintln!("Failed to read from connection: {}", e),
     }
 }
-
-fn handle_get_request(full_path: &PathBuf, headers: &[String], client_addr: std::net::IpAddr) -> String {
+fn handle_get_request(full_path: &Path, headers: &[String], client_addr: std::net::IpAddr) -> String {
     if !full_path.exists() {
         return http_response(404, "Not Found", None, None);
     }
@@ -112,7 +101,6 @@ fn handle_get_request(full_path: &PathBuf, headers: &[String], client_addr: std:
     match fs::read(full_path) {
         Ok(contents) => {
             let mime_type = get_mime_type(full_path);
-            let content_type = Some(mime_type); // Adjusted to Some(mime_type) for Option<&str>
             let status_code = 200;
             let status_text = "OK";
 
@@ -123,9 +111,9 @@ fn handle_get_request(full_path: &PathBuf, headers: &[String], client_addr: std:
             let log_message = format!("{} {} {} -> {} ({})", method, client_ip, path, status_code, status_text);
             println!("{}", log_message);
 
-            http_response(status_code, status_text, content_type, Some(&contents))
+            http_response(status_code, status_text, mime_type, Some(&contents))
         }
-        Err(_) => http_response(403, "Forbidden", None, None),
+        Err(_) => http_response(403, "Forbidden", None, None), // Changed to 403 for file read errors
     }
 }
 
