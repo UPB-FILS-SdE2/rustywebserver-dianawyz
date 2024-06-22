@@ -24,10 +24,10 @@ This function processes POST requests. Checks if the requested script exists in 
 
 ### http_response
 This function constructs an HTTP response string. It includes:
-    * Status code
-    * Status text
-    * Headers
-    * Body
+* Status code
+* Status text
+* Headers
+* Body
 
 ### generate_directory_listing
 This function generates an HTML response. It lists the contents of a directory, including a link to the parent directory
